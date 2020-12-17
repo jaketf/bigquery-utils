@@ -24,7 +24,6 @@ import google.api_core.client_info
 import google.api_core.exceptions
 from google.cloud import storage
 
-
 CLIENT_INFO = google.api_core.client_info.ClientInfo(
     user_agent="google-pso-tool/bq-severless-loader-cli")
 

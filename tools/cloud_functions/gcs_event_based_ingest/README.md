@@ -510,6 +510,12 @@ optional arguments:
                         This will default to the success-filename
 ```
 
+## Docker for CLI tools
+```bash
+docker build . -t backfill-cli:latest
+docker run -ti -v $(pwd):/tmp -w /tmp backfill-cli:latest backfill.py
+```
+
 
 ## Alternatives
 ### BQ Tail

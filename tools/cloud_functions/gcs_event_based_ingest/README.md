@@ -480,6 +480,37 @@ optional arguments:
                         Override the default destination regex for determining BigQuery destination based on information encoded in the GCS path of the success file
 ```
 
+## Reposting
+In some scenarios you may want to search for success files and reupload them to
+retrigger the Cloud Function, or upload a different file (e.g. `_DONE` instead
+of `_SUCCESS`) in order to test a new deployment of the Cloud Function on just
+a single table or to recover from some disastrous scenario where you need to
+replay the entire ingestion of a table.
+
+### Usage
+```text
+usage: repost.py [-h] --gcs-path GCS_PATH [--mode {SERIAL,PARALLEL}]
+                 [--success-filename SUCCESS_FILENAME]
+                 [--repost-filename REPOST_FILENAME]
+
+utility to repost GCS blobs for every success blob at a GCS prefix
+
+optional arguments:
+  -h, --help            show this help message and exit
+  --gcs-path GCS_PATH, -p GCS_PATH
+                        GCS path (e.g. gs://bucket/prefix/to/search/)to search
+                        for existing _SUCCESS files
+  --mode {SERIAL,PARALLEL}, -m {SERIAL,PARALLEL}
+                        How to perform the backfill: SERIAL upload the repost
+                        files in order. PARALLEL upload the repost files in
+                        parallel (faster)
+  --success-filename SUCCESS_FILENAME, -f SUCCESS_FILENAME
+                        Override the default success filename '_SUCCESS'
+  --repost-filename REPOST_FILENAME, -rf REPOST_FILENAME
+                        This will default to the success-filename
+```
+
+
 ## Alternatives
 ### BQ Tail
 [bqtail](https://github.com/viant/bqtail) is a similar serverless configuration

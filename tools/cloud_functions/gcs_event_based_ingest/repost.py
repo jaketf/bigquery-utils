@@ -18,17 +18,17 @@ import concurrent.futures
 import logging
 import os
 import pprint
-from typing import Dict, Iterator, List, Optional
+from typing import Dict, Iterator
 
 import google.api_core.client_info
+import google.api_core.exceptions
 from google.cloud import storage
 
-import gcs_ocn_bq_ingest.main  # pylint: disable=import-error
 
 CLIENT_INFO = google.api_core.client_info.ClientInfo(
     user_agent="google-pso-tool/bq-severless-loader-cli")
 
-os.environ["FUNCTION_NAME"] = "backfill-cli"
+logging.basicConfig(level='INFO')
 
 
 def find_blobs_with_suffix(
@@ -52,54 +52,41 @@ def find_blobs_with_suffix(
                                       prefix=prefix_blob.name))
 
 
+def upload_empty_blob_and_log(gcs_client: storage.Client, blob: storage.Blob):
+    try:
+        blob.upload_from_string("", if_generation_match=0, client=gcs_client)
+        logging.info(f"uploaded gs://{blob.bucket.name}/{blob.name}")
+    except google.api_core.exceptions.PreconditionFailed:
+        logging.info(
+            f"skipping gs://{blob.bucket.name}/{blob.name}, already exists.")
+
+
 def main(args: argparse.Namespace):
     """main entry point for backfill CLI."""
     gcs_client: storage.Client = storage.Client(client_info=CLIENT_INFO)
-    pubsub_client = None
     suffix = args.success_filename
-    if args.destination_regex:
-        os.environ["DESTINATION_REGEX"] = args.destination_regex
-    if args.mode == "NOTIFICATIONS":
-        if not args.pubsub_topic:
-            raise ValueError("when passing mode=NOTIFICATIONS"
-                             "you must also pass pubsub_topic.")
-        # import is here because this utility can be used without
-        # google-cloud-pubsub dependency in LOCAL mode.
-        # pylint: disable=import-outside-toplevel
-        from google.cloud import pubsub
-        pubsub_client = pubsub.PublisherClient()
+    repost_filename = (args.repost_filename
+                       if args.repost_filename else args.success_filename)
+    if args.mode == "SERIAL":
+        for blob in find_blobs_with_suffix(gcs_client, args.gcs_path, suffix):
+            repost_blob = blob.bucket.blob(
+                f"{os.path.dirname(blob.name)}/{repost_filename}"
+            )
+            upload_empty_blob_and_log(gcs_client, repost_blob)
+        return
 
+    assert args.mode == "PARALLEL"
     # These are all I/O bound tasks so use Thread Pool concurrency for speed.
     with concurrent.futures.ThreadPoolExecutor() as executor:
         future_to_gsurl = {}
         for blob in find_blobs_with_suffix(gcs_client, args.gcs_path, suffix):
-            if pubsub_client:
-                # kwargs are message attributes
-                # https://googleapis.dev/python/pubsub/latest/publisher/index.html#publish-a-message
-                logging.info("sending pubsub message for: %s",
-                             f"gs://{blob.bucket.name}/{blob.name}")
-                future_to_gsurl[executor.submit(
-                    pubsub_client.publish,
-                    args.pubsub_topic,
-                    b'',  # cloud function ignores message body
-                    bucketId=blob.bucket.name,
-                    objectId=blob.name,
-                    _metaInfo="this message was submitted with "
-                    "gcs_ocn_bq_ingest backfill.py utility"
-                )] = f"gs://{blob.bucket.name}/{blob.name}"
-            else:
-                logging.info("running  cloud function locally for: %s",
-                             f"gs://{blob.bucket.name}/{blob.name}")
-                future_to_gsurl[executor.submit(
-                    gcs_ocn_bq_ingest.main.main,
-                    {
-                        "attributes": {
-                            "bucketId": blob.bucket.name,
-                            "objectId": blob.name
-                        }
-                    },
-                    None,
-                )] = f"gs://{blob.bucket.name}/{blob.name}"
+            repost_blob = blob.bucket.blob(
+                f"{os.path.dirname(blob.name)}/{repost_filename}"
+            )
+            future_to_gsurl[executor.submit(
+                upload_empty_blob_and_log,
+                gcs_client, repost_blob
+            )] = f"gs://{blob.bucket.name}/{blob.name}"
         exceptions: Dict[str, Exception] = dict()
         for future in concurrent.futures.as_completed(future_to_gsurl):
             gsurl = future_to_gsurl[future]
@@ -111,13 +98,14 @@ def main(args: argparse.Namespace):
         if exceptions:
             raise RuntimeError("The following errors were encountered:\n" +
                                pprint.pformat(exceptions))
+        return
 
 
-def parse_args(args: Optional[List[str]]) -> argparse.Namespace:
+def parse_args() -> argparse.Namespace:
     """argument parser for backfill CLI"""
     parser = argparse.ArgumentParser(
-        description="utility to backfill success file notifications "
-        "or run the cloud function locally in concurrent threads.")
+        description="utility to repost GCS blobs for every success blob at a "
+                    "GCS prefix")
 
     parser.add_argument(
         "--gcs-path",
@@ -130,25 +118,12 @@ def parse_args(args: Optional[List[str]]) -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         "-m",
-        help="How to perform the backfill: LOCAL run cloud function main"
-        " method locally (in concurrent threads) or NOTIFICATIONS just push"
-        " notifications to Pub/Sub for a deployed version of the cloud function"
-        " to pick up. Default is NOTIFICATIONS.",
+        help="How to perform the backfill: SERIAL upload the repost files in"
+        " order. PARALLEL upload the repost files in parallel (faster)",
         required=False,
         type=str.upper,
-        choices=["LOCAL", "NOTIFICATIONS"],
-        default="NOTIFICATIONS",
-    )
-
-    parser.add_argument(
-        "--pubsub-topic",
-        "--topic",
-        "-t",
-        help="Pub/Sub notifications topic to post notifications for. "
-        "i.e. projects/{PROJECT_ID}/topics/{TOPIC_ID} "
-        "Required if using NOTIFICATIONS mode.",
-        required=False,
-        default=None,
+        choices=["SERIAL", "PARALLEL"],
+        default="PARALLEL",
     )
 
     parser.add_argument(
@@ -160,16 +135,15 @@ def parse_args(args: Optional[List[str]]) -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--destination-regex",
-        "-r",
-        help="Override the default destination regex for determining BigQuery"
-        "destination based on information encoded in the GCS path of the"
-        "success file",
+        "--repost-filename",
+        "-rf",
+        help="This will default to the success-filename",
         required=False,
         default=None,
     )
-    return parser.parse_args(args) if args else parser.parse_args()
+
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    main(parse_args(None))
+    main(parse_args())

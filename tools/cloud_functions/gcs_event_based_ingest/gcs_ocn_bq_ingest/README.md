@@ -59,7 +59,80 @@ DEFAULT_DESTINATION_REGEX = (
     r")?"                             # [end]yyyy/mm/dd/hh/ group (optional)
     r"(?P<batch>[\w\-_0-9]+)?/"       # batch id (optional)
 )
-`
+```
+
+## Monitoring
+### monitored_tables
+To monitor the status of the tables loaded by the cloud function, you must first add records to the monitored_tables table. The records in this table are used by the gcf_ingest_log and gcf_ingest_latest_by_table views to know which tables to report on.
+
+### gcf_ingest_log
+This gives you a view of all of the attempts to load a given chunk. For example, if we wanted to see the entire history of chunk attempts for a 'table_a', we would run the follwing query:
+```sql
+SELECT
+  project_id,
+  dataset_id,
+  table_id,
+  job_type,
+  attempted_chunk,
+  job_id,
+  start_time,
+  end_time,
+  query,
+  gb_per_sec_throughput,
+  total_slot_ms,
+  avg_slots_used,
+  outcome,
+  error_result
+FROM
+  `default-dataset`.gcf_ingest_log
+WHERE
+  table_id = 'table_a'
+
+```
+This will give you something like:
+
+| project_id    | dataset_id | table_id | job_type |attempted_chunk                                 |                                                     job_id                                          |     start_time      |      end_time       | query | gb_per_sec_throughput | total_slot_ms |   avg_slots_used   |  outcome  |       error_result     |
+|---------------|------------|----------|----------|------------------------------------------------|-----------------------------------------------------------------------------------------------------|---------------------|---------------------|-------|-----------------------|---------------|--------------------|-----------|------------------------|
+| my-project-id | dataset_a  | table_a  | LOAD     | db-dataset_a-table_a-incremental-1900-01-01-08 | gcf-ingest-db-dataset_a-table_a-incremental-1900-01-01-08-_DONE9197a23a-8791-4a0e-aab7-55b132728ca6 | 2021-01-11 18:13:52 | 2021-01-11 18:13:54 | NULL  |                   0.0 |          1132 | 0.5421455938697318 | FAILED    | {"Some error message"} |
+| my-project-id | dataset_a  | table_a  | LOAD     | db-dataset_a-table_a-incremental-1900-01-01-08 | gcf-ingest-db-dataset_a-table_a-incremental-1900-01-01-08-_DONEc0f17aa2-740f-4cae-80b7-02c185e5057a | 2021-01-11 20:04:12 | 2021-01-11 20:04:25 | NULL  |    1260021.5833333333 |         14620 | 1.1520882584712373 | SUCCEEDED |                   NULL |
+
+
+To deploy the gcf_ingest_log, you must replace the 'REPLACEME-audit-log-project-id' and 'REPLACEME-audit-log-dataset' with the correct project_id and dataset. You can also replace the `default-dataset` with your preferred dataset.
+
+### gcf_ingest_latest_by_table
+This view gives you the latest status for the latest chunk for a given table. If we wanted to see the latest chunk status for table 'table_a' we would run:
+```sql
+SELECT
+  project_id,
+  dataset_id,
+  table_id,
+  job_type,
+  attempted_chunk,
+  job_id,
+  start_time,
+  end_time,
+  query,
+  gb_per_sec_throughput,
+  total_slot_ms,
+  avg_slots_used,
+  outcome,
+  error_result
+FROM
+  `default-dataset`.gcf_ingest_latest_by_table
+WHERE
+  table_id = 'table_a'
+
+```
+
+This will give you something like:
+
+| project_id    | dataset_id | table_id | job_type | attempted_chunk                                | job_id                                                                                              | start_time          | end_time            | query | gb_per_sec_throughput | total_slot_ms | avg_slots_used     | outcome   | error_result |
+|---------------|------------|----------|----------|------------------------------------------------|-----------------------------------------------------------------------------------------------------|---------------------|---------------------|-------|-----------------------|---------------|--------------------|-----------|--------------|
+| my-project-id | dataset_a  | table_a  | LOAD     | db-dataset_a-table_a-incremental-1900-01-01-08 | gcf-ingest-db-dataset_a-table_a-incremental-1900-01-01-08-_DONEc0f17aa2-740f-4cae-80b7-02c185e5057a | 2021-01-11 20:04:12 | 2021-01-11 20:04:25 | NULL  | 1260021.5833333333    | 14620         | 1.1520882584712373 | SUCCEEDED | NULL         |
+
+
+This table is best used for a high-level view of your ingestion status.
+
  
 ## Implementation notes
 1. To support notifications based on a GCS prefix

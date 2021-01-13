@@ -274,7 +274,7 @@ SELECT
    query,
    total_bytes_processed,
    total_slot_ms,
-   destination_table
+   destination_table,
    state,
    error_result,
    (SELECT value FROM UNNEST(labels) WHERE key = "component") as component,

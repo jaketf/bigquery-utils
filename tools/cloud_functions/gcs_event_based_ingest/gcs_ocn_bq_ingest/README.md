@@ -100,7 +100,7 @@ This will give you something like:
 To deploy the gcf_ingest_log, you must replace the 'REPLACEME-audit-log-project-id' and 'REPLACEME-audit-log-dataset' with the correct project_id and dataset. You can also replace the `default-dataset` with your preferred dataset.
 
 ### gcf_ingest_latest_by_table
-This view gives you the latest status for the latest chunk for a given table. If we wanted to see the latest chunk status for table 'table_a' we would run:
+This view gives you the latest status for the latest load / query job for a given table. If we wanted to see the latest chunk status for table 'table_a' we would run:
 ```sql
 SELECT
   project_id,

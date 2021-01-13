@@ -65,7 +65,7 @@ DEFAULT_DESTINATION_REGEX = (
 ### `monitored_tables`
 To monitor the status of the tables loaded by the Cloud Function, you must first add records to the `monitored_tables` table. The records in this table are used by the `gcf_ingest_log` and` gcf_ingest_latest_by_table` views to know which tables to report on.
 
-### gcf_ingest_log
+### `gcf_ingest_log`
 This gives you a view of all of the attempts to load a given chunk. For example, if we wanted to see the entire history of chunk attempts for a 'table_a', we would run the follwing query:
 ```sql
 SELECT

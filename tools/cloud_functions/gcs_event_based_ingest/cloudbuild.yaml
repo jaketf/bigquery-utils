@@ -34,6 +34,13 @@ steps:
     - '--cache=true'
     - '--context=dir:///workspace/${_BUILD_DIR}'
   id: 'build-ci-image'
+- name: 'gcr.io/$PROJECT_ID/test_monitoring_tables'
+  waitFor:
+    - 'build-ci-image'
+  dir: '${_BUILD_DIR}'
+  entrypoint: 'bash'
+  args: [ 'tests/test_monitoring_tables.sh' ]
+  id: 'test-monitoring-queries'
 - name: 'gcr.io/$PROJECT_ID/gcs_event_based_ingest_ci'
   dir: '${_BUILD_DIR}'
   entrypoint: 'isort'

@@ -34,7 +34,7 @@ steps:
     - '--cache=true'
     - '--context=dir:///workspace/${_BUILD_DIR}'
   id: 'build-ci-image'
-- name: 'gcr.io/$PROJECT_ID/gcs_event_based_ingest_ci'
+- name: 'google/cloud-sdk'
   waitFor:
     - 'build-ci-image'
   dir: '${_BUILD_DIR}'

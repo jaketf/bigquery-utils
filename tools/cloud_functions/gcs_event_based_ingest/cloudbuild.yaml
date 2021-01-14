@@ -34,7 +34,7 @@ steps:
     - '--cache=true'
     - '--context=dir:///workspace/${_BUILD_DIR}'
   id: 'build-ci-image'
-- name: 'gcr.io/$PROJECT_ID/test_monitoring_tables'
+- name: 'gcr.io/$PROJECT_ID/gcs_event_based_ingest_ci'
   waitFor:
     - 'build-ci-image'
   dir: '${_BUILD_DIR}'

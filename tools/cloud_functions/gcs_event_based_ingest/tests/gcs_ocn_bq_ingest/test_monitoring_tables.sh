@@ -37,6 +37,6 @@ do
     echo "Failed to dry run $query_file"
     exit "$result"
   fi
-done <  <(find ../../gcs_ocn_bq_ingest/monitoring -path "*.sql")
+done <  <(find gcs_ocn_bq_ingest/monitoring -path "*.sql")
 echo "removing dataset $DATASET"
 bq rm -r -f -d $DATASET

@@ -25,7 +25,7 @@ function dry_run_query() {
 }
 
 echo "setting DATASET env variable"
-export DATASET='test_monitoring_dataset'
+export DATASET="test_monitoring_dataset_${BUILD_ID}"
 bq --location=US mk -f -d $DATASET
 
 while IFS= read -r query_file

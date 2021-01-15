@@ -59,6 +59,7 @@ def backlog_subscriber(gcs_client: Optional[storage.Client],
     """Pick up the table lock, poll BQ job id until completion and process next
     item in the backlog.
     """
+    # TODO(jaketf): enhance to handle waiting for dataproc workflow templates.
     print(f"started backfill subscriber for gs://{backfill_blob.bucket.name}/"
           f"{backfill_blob.name}")
     gcs_client, bq_client = _get_clients_if_none(gcs_client, bq_client)

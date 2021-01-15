@@ -27,6 +27,7 @@ from typing import Dict, Optional
 from google.cloud import bigquery
 from google.cloud import error_reporting
 from google.cloud import storage
+from google.cloud.dataproc_v1beta2.services import workflow_template_service
 
 try:
     from common import constants
@@ -48,6 +49,8 @@ ERROR_REPORTING_CLIENT = None
 BQ_CLIENT = None
 
 GCS_CLIENT = None
+
+DATAPROC_WORKFLOW_TEMPLATE_CLIENT = None
 
 
 def main(event: Dict, context):  # pylint: disable=unused-argument
@@ -73,6 +76,7 @@ def main(event: Dict, context):  # pylint: disable=unused-argument
 
         gcs_client = lazy_gcs_client()
         bq_client = lazy_bq_client()
+        dp_wft_client = lazy_dataproc_workflow_template_client()
 
         enforce_ordering = (constants.ORDER_PER_TABLE
                             or utils.look_for_config_in_parents(
@@ -82,8 +86,8 @@ def main(event: Dict, context):  # pylint: disable=unused-argument
         bkt: storage.Bucket = utils.cached_get_bucket(gcs_client, bucket_id)
         event_blob: storage.Blob = bkt.blob(object_id)
 
-        triage_event(gcs_client, bq_client, event_blob, function_start_time,
-                     enforce_ordering)
+        triage_event(gcs_client, bq_client, dp_wft_client, event_blob,
+                     function_start_time, enforce_ordering)
 
     # Unexpected exceptions will actually raise which may cause a cold restart.
     except exceptions.DuplicateNotificationException:
@@ -106,11 +110,14 @@ def main(event: Dict, context):  # pylint: disable=unused-argument
             raise original_error
 
 
-def triage_event(gcs_client: Optional[storage.Client],
-                 bq_client: Optional[bigquery.Client],
-                 event_blob: storage.Blob,
-                 function_start_time: float,
-                 enforce_ordering: bool = False):
+def triage_event(
+        gcs_client: Optional[storage.Client],
+        bq_client: Optional[bigquery.Client],
+        dp_wft_client: Optional[
+            workflow_template_service.client.WorkflowTemplateServiceClient],
+        event_blob: storage.Blob,
+        function_start_time: float,
+        enforce_ordering: bool = False):
     """call the appropriate method based on the details of the trigger event
     blob."""
     bkt = event_blob.bucket
@@ -203,3 +210,17 @@ def lazy_gcs_client() -> storage.Client:
     if not GCS_CLIENT:
         GCS_CLIENT = storage.Client(client_info=constants.CLIENT_INFO)
     return GCS_CLIENT
+
+
+def lazy_dataproc_workflow_template_client(
+) -> workflow_template_service.client.WorkflowTemplateServiceClient:
+    """
+    Return a BigQuery Client that may be shared between cloud function
+    invocations.
+    """
+    global DATAPROC_WORKFLOW_TEMPLATE_CLIENT
+    if not DATAPROC_WORKFLOW_TEMPLATE_CLIENT:
+        DATAPROC_WORKFLOW_TEMPLATE_CLIENT = \
+            workflow_template_service.client.WorkflowTemplateServiceClient(
+                client_info=constants.CLIENT_INFO)
+    return DATAPROC_WORKFLOW_TEMPLATE_CLIENT

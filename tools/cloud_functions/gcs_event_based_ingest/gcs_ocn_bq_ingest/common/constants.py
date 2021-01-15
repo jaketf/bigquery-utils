@@ -16,11 +16,13 @@
 # limitations under the License.
 """Configurations for Cloud Function for loading data from GCS to BigQuery.
 """
+import datetime
 import distutils.util
 import os
 import re
 
 import google.api_core.client_info
+import google.api_core.retry
 import google.cloud.exceptions
 
 # Will wait up to this long polling for errors in a bq job before exiting
@@ -137,3 +139,15 @@ BQ_DML_STATEMENT_TYPES = {
 
 # https://cloud.google.com/bigquery/docs/running-jobs#generate-jobid
 NON_BQ_JOB_ID_REGEX = re.compile(r'[^0-9a-zA-Z_\-]+')
+
+# Control how Dataproc Workflow Templates are submitted.
+DATAPROC_PROJECT_ID = os.getenv("DATAPROC_PROJECT_ID")
+DATAPROC_REGION = os.getenv("DATAPROC_REGION", "us-central1")
+
+DATAPROC_WFT_PARENT = (f"projects/{DATAPROC_PROJECT_ID}/"
+                       f"regions/{DATAPROC_REGION}")
+
+DATAPROC_TIMEOUT = os.getenv("DATAPROC_TIMEOUT",
+                             str(datetime.timedelta(hours=1).total_seconds()))
+
+DATAPROC_METADATA = DEFAULT_JOB_LABELS.items()

@@ -36,6 +36,8 @@ import google.cloud.exceptions
 # pylint in cloud build is being flaky about this import discovery.
 from google.cloud import bigquery
 from google.cloud import storage
+from google.cloud.dataproc_v1beta2.services import workflow_template_service
+from google.cloud.dataproc_v1beta2.types import workflow_templates
 
 from . import constants  # pylint: disable=no-name-in-module,import-error
 from . import exceptions  # pylint: disable=no-name-in-module,import-error
@@ -681,6 +683,7 @@ def handle_bq_lock(gcs_client: storage.Client, lock_blob: storage.Blob,
                    next_job_id: Optional[str]):
     """Reclaim the lock blob for the new job id (in-place) or delete the lock
     blob if next_job_id is None."""
+    # TODO(jaketf): handle waiting on dataproc workflow templates to complete.
     try:
         if next_job_id:
             if lock_blob.exists(client=gcs_client):
@@ -708,6 +711,8 @@ def handle_bq_lock(gcs_client: storage.Client, lock_blob: storage.Blob,
 def apply(
     gcs_client: storage.Client,
     bq_client: bigquery.Client,
+    dp_wft_client: workflow_template_service.client.
+    WorkflowTemplateServiceClient,
     success_blob: storage.Blob,
     lock_blob: Optional[storage.Blob],
     job_id: str,
@@ -719,6 +724,7 @@ def apply(
     Args:
         gcs_client: storage.Client
         bq_client: bigquery.Client
+        dp_wft_client: workflow_template_service.client.WorkflowTemplateServiceClient
         success_blob: storage.Blob the success file whose batch should be
             applied.
         lock_blob: storage.Blob _bqlock blob to acquire for this job.
@@ -745,6 +751,86 @@ def apply(
                        dest_table_ref, job_id)
         return
 
+    workflow_template = look_for_config_in_parents(
+        gcs_client, f"gs://{bkt.name}/{success_blob.name}",
+        'workflow_template.json')
+
+    if workflow_template:
+        print("DATAPROC_WORKFLOW_TEMPLATE")
+        print(f"found workflow template:\n{workflow_template}")
+        instantiate_inline_workflow_template(gcs_client, dp_wft_client, gsurl,
+                                             dest_table_ref, job_id)
+        return
+
     print("LOAD_JOB")
     load_batches(gcs_client, bq_client, gsurl, dest_table_ref, job_id)
     return
+
+
+def instantiate_inline_workflow_template(
+        gcs_client: storage.Client, dp_wft_client: workflow_template_service.
+    client.WorkflowTemplateServiceClient, gsurl: str,
+        dest_table_ref: bigquery.TableReference, job_id: str):
+    """Submit a Dataproc Workflow Template. The assumption is that this job will
+    be responsible for reading data from GCS and write to BigQuery as might be
+    necessary in scenarios where transformations not supported by BigQuery are
+    required.
+
+    Workflow templates can have the following information templated in job args
+    or script variables:
+       gsurl: gcs wild card for data to process
+       dest_project: destination bigquery project
+       dest_dataset: destination bigquery dataset ID
+       dest_table: destination bigqueery table ID
+    """
+    workflow_template_config = read_gcs_file_if_exists(
+        gcs_client, f"{gsurl}_config/workflow_template.json")
+    if not workflow_template_config:
+        workflow_template_config = look_for_config_in_parents(
+            gcs_client, gsurl, "workflow_template.json")
+    if workflow_template_config:
+        workflow_template_json = json.loads(workflow_template_config)
+    else:
+        raise RuntimeError("could not find _config/workflow_template.json in"
+                           f" {gsurl} or parent paths")
+
+    # TODO(jaketf): arg rendering should be it's own unit tested function.
+    # Render runtime information from GCS path into workflow template job args
+    # or script variables.
+    jobs = workflow_template_json["jobs"]
+    for job in jobs:
+        job["labels"] = constants.DEFAULT_JOB_LABELS
+        job_type = next(key for key in job.keys() if key.ends_with("Job"))
+        if job[job_type].get("args"):
+            # Runtime args in [Py]Spark[R], and Hadoop jobs
+            job[job_type]["args"] = [
+                arg.format(gsurl=gsurl,
+                           dest_project=dest_table_ref.project,
+                           dest_dataset=dest_table_ref.dataset_id,
+                           dest_table=dest_table_ref.table_id)
+                for arg in job[job_type.get("args")]
+            ]
+        if job[job_type].get("scriptVariables"):
+            # Runtime script variables for Hive, Pig, and SparkSql Jobs
+            job[job_type]["scriptVariables"].update({
+                "gsurl": gsurl,
+                "dest_project": dest_table_ref.project,
+                "dest_dataset": dest_table_ref.dataset_id,
+                "dest_table": dest_table_ref.table_id
+            })
+    print("rendered workflow template:\n"
+          f"{pprint.pformat(workflow_template_json, indent=4)}")
+
+    template = workflow_templates.WorkflowTemplate.from_json(
+        workflow_template_json)
+
+    request = workflow_templates.InstantiateInlineWorkflowTemplateRequest()
+    request.request_id = job_id
+    request.template = template
+
+    dp_wft_client.instantiate_inline_workflow_template(
+        request=request,
+        parent=constants.DATAPROC_WFT_PARENT,
+        timeout=constants.DATAPROC_TIMEOUT,
+        metadata=constants.DATAPROC_METADATA,
+    )

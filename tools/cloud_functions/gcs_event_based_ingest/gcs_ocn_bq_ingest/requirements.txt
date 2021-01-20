@@ -2,3 +2,6 @@ google-cloud-bigquery==2.6.2
 google-cloud-storage==1.35.0
 google-cloud-error-reporting==1.1.0
 google-cloud-dataproc==2.2.0
+google-api-python-client
+google-auth
+google-auth-oauthlib

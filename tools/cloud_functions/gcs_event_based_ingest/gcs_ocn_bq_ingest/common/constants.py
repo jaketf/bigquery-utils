@@ -141,6 +141,8 @@ BQ_DML_STATEMENT_TYPES = {
 NON_BQ_JOB_ID_REGEX = re.compile(r'[^0-9a-zA-Z_\-]+')
 
 # Control how Dataproc Workflow Templates are submitted.
+DATAPROC_ENABLED = distutils.util.strtobool(
+    os.getenv("DATAPROC_ENABLED", "False"))
 DATAPROC_PROJECT_ID = os.getenv("DATAPROC_PROJECT_ID")
 DATAPROC_REGION = os.getenv("DATAPROC_REGION", "us-central1")
 
@@ -151,3 +153,14 @@ DATAPROC_TIMEOUT = os.getenv("DATAPROC_TIMEOUT",
                              str(datetime.timedelta(hours=1).total_seconds()))
 
 DATAPROC_METADATA = DEFAULT_JOB_LABELS.items()
+
+# Control how Dataflow Templates are submitted.
+DATAFLOW_ENABLED = distutils.util.strtobool(
+    os.getenv("DATAFLOW_ENABLED", "False"))
+DATAFLOW_PROJECT_ID = os.getenv("DATAFLOW_PROJECT_ID",)
+DATAFLOW_REGION = os.getenv("DATAFLOW_REGION", "us-central1")
+
+DATAFLOW_METADATA = DEFAULT_JOB_LABELS.items()
+
+DATAFLOW_DEFAULT_TEMPLATE_GCS_PATH = \
+    "gs://dataflow-templates/latest/GCS_Text_to_BigQuery"

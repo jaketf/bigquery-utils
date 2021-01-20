@@ -26,13 +26,16 @@ import pathlib
 import pprint
 import time
 import uuid
+import textwrap
 from typing import Any, Deque, Dict, List, Optional, Tuple, Union
 
 import cachetools
 import google.api_core
 import google.api_core.client_info
 import google.api_core.exceptions
+import google.api_core.operation
 import google.cloud.exceptions
+import googleapiclient.discovery
 # pylint in cloud build is being flaky about this import discovery.
 from google.cloud import bigquery
 from google.cloud import storage
@@ -711,8 +714,9 @@ def handle_bq_lock(gcs_client: storage.Client, lock_blob: storage.Blob,
 def apply(
     gcs_client: storage.Client,
     bq_client: bigquery.Client,
-    dp_wft_client: workflow_template_service.client.
-    WorkflowTemplateServiceClient,
+    dp_wft_client: Optional[
+        workflow_template_service.client.WorkflowTemplateServiceClient],
+    dataflow_client: Optional[googleapiclient.discovery.Resource],
     success_blob: storage.Blob,
     lock_blob: Optional[storage.Blob],
     job_id: str,
@@ -738,9 +742,41 @@ def apply(
                                                         bq_client.project)
     gsurl = removesuffix(f"gs://{bkt.name}/{success_blob.name}",
                          constants.SUCCESS_FILENAME)
-    print(
-        "looking for a transformation tranformation sql file in parent _config."
-    )
+    print("looking for a dataflow_template.json file in parent _config.")
+    dataflow_template = look_for_config_in_parents(
+        gcs_client, f"gs://{bkt.name}/{success_blob.name}",
+        'dataflow_template.json')
+
+    if dataflow_template:
+        if not constants.DATAFLOW_ENABLED:
+            raise RuntimeError("Found workflow_template.json for "
+                               f"gs://{bkt.name}/{success_blob.name} "
+                               "but DATAPROC_ENABLED environment variables was "
+                               "not set to True.")
+        print("DATAFLOW_TEMPLATE")
+        print(f"found dataflow template:\n{dataflow_template}")
+        launch_dataflow_template(
+            gcs_client, bq_client, dataflow_client, gsurl, dest_table_ref,
+            job_id)
+        return
+    print("looking for a workflow_template.json file in parent _config.")
+    workflow_template = look_for_config_in_parents(
+        gcs_client, f"gs://{bkt.name}/{success_blob.name}",
+        'workflow_template.json')
+
+    if workflow_template:
+        if not constants.DATAPROC_ENABLED:
+            raise RuntimeError("Found workflow_template.json for "
+                               f"gs://{bkt.name}/{success_blob.name} "
+                               "but DATAPROC_ENABLED environment variables was "
+                               "not set to True.")
+        print("DATAPROC_WORKFLOW_TEMPLATE")
+        print(f"found workflow template:\n{workflow_template}")
+        instantiate_inline_workflow_template(gcs_client, dp_wft_client, gsurl,
+                                             dest_table_ref, job_id)
+        return
+
+    print("looking for a transformation *.sql file in parent _config.")
     external_query_sql = look_for_config_in_parents(
         gcs_client, f"gs://{bkt.name}/{success_blob.name}", '*.sql')
 
@@ -751,26 +787,19 @@ def apply(
                        dest_table_ref, job_id)
         return
 
-    workflow_template = look_for_config_in_parents(
-        gcs_client, f"gs://{bkt.name}/{success_blob.name}",
-        'workflow_template.json')
-
-    if workflow_template:
-        print("DATAPROC_WORKFLOW_TEMPLATE")
-        print(f"found workflow template:\n{workflow_template}")
-        instantiate_inline_workflow_template(gcs_client, dp_wft_client, gsurl,
-                                             dest_table_ref, job_id)
-        return
-
     print("LOAD_JOB")
     load_batches(gcs_client, bq_client, gsurl, dest_table_ref, job_id)
     return
 
 
+# yapf: disable
 def instantiate_inline_workflow_template(
-        gcs_client: storage.Client, dp_wft_client: workflow_template_service.
-    client.WorkflowTemplateServiceClient, gsurl: str,
-        dest_table_ref: bigquery.TableReference, job_id: str):
+    gcs_client: storage.Client,
+    dp_wft_client: workflow_template_service.client.WorkflowTemplateServiceClient,
+    gsurl: str,
+    dest_table_ref: bigquery.TableReference, job_id: str
+):
+    # yapf: enable
     """Submit a Dataproc Workflow Template. The assumption is that this job will
     be responsible for reading data from GCS and write to BigQuery as might be
     necessary in scenarios where transformations not supported by BigQuery are
@@ -805,7 +834,7 @@ def instantiate_inline_workflow_template(
             # Runtime args in [Py]Spark[R], and Hadoop jobs
             job[job_type]["args"] = [
                 arg.format(gsurl=gsurl,
-                           dest_project=dest_table_ref.project,
+                           dest_project=os.getenv("BQ_STORAGE_PROJECT"),
                            dest_dataset=dest_table_ref.dataset_id,
                            dest_table=dest_table_ref.table_id)
                 for arg in job[job_type.get("args")]
@@ -814,7 +843,7 @@ def instantiate_inline_workflow_template(
             # Runtime script variables for Hive, Pig, and SparkSql Jobs
             job[job_type]["scriptVariables"].update({
                 "gsurl": gsurl,
-                "dest_project": dest_table_ref.project,
+                "dest_project": os.getenv("BQ_STORAGE_PROJECT"),
                 "dest_dataset": dest_table_ref.dataset_id,
                 "dest_table": dest_table_ref.table_id
             })
@@ -834,3 +863,262 @@ def instantiate_inline_workflow_template(
         timeout=constants.DATAPROC_TIMEOUT,
         metadata=constants.DATAPROC_METADATA,
     )
+
+
+def launch_dataflow_template(
+        gcs_client: storage.Client,
+        bq_client: bigquery.Client,
+        dataflow_client: googleapiclient.discovery.Resource, gsurl: str,
+        dest_table_ref: bigquery.TableReference, job_id: str) -> str:
+    """Submit a Dataflow Template. The assumption is that this job will
+    be responsible for reading data from GCS and write to BigQuery as might be
+    necessary in scenarios where transformations not supported by BigQuery are
+    required.
+
+    The dataflow_template.json should contain a json blob with
+    LaunchTemplateParameters schema plus a "gcsPath" key (which will be passed
+    as a query parameter). If the gcsPath parameter is missing, we will use the
+    default Google Provided GCS to BigQuery template
+
+    For additional context, see:
+    https://cloud.google.com/dataflow/docs/guides/templates/provided-batch#cloud-storage-text-to-bigquery
+    https://cloud.google.com/dataflow/docs/reference/rest/v1b3/LaunchTemplateParameters
+
+    templates can have the following information templated in job args
+    or script variables:
+       gsurl: gcs wild card for data to process
+       dest_project: destination bigquery project
+       dest_dataset: destination bigquery dataset ID
+       dest_table: destination bigqueery table ID
+
+    Returns:
+        str: job id for the Cloud Dataflow job.
+    """
+
+    template_config = read_gcs_file_if_exists(
+        gcs_client, f"{gsurl}_config/dataflow_template.json")
+    if not template_config:
+        template_config = look_for_config_in_parents(gcs_client, gsurl,
+                                                     "dataflow_template.json")
+    if template_config:
+        launch_template_params = json.loads(template_config)
+    else:
+        raise RuntimeError("could not find _config/workflow_template.json in"
+                           f" {gsurl} or parent paths")
+
+
+    template_gcs_path = launch_template_params.pop(
+        "gcsPath", constants.DATAFLOW_DEFAULT_TEMPLATE_GCS_PATH)
+
+    if template_gcs_path == constants.DATAFLOW_DEFAULT_TEMPLATE_GCS_PATH:
+        # look up schema dynamically.
+        dest_table: bigquery.Table = bq_client.get_table(dest_table_ref)
+        dest_schema_fields = dest_table.to_api_repr()["schema"]["fields"]
+        # https://cloud.google.com/dataflow/docs/guides/templates/provided-batch#cloud-storage-text-to-bigquery
+        wrapped_schema = {"BigQuery Schema": dest_schema_fields}
+        schema_gsurl = f"{gsurl}_config/schema.json"
+        print(
+            f"writing schema JSON object to {schema_gsurl} for use by dataflow "
+            f"template"
+        )
+        blob = storage.Blob.from_string(schema_gsurl)
+        blob.upload_from_string(json.dumps(wrapped_schema),
+                                content_type='application/json',
+                                client=gcs_client)
+        launch_template_params["parameters"]["JSONPath"] = schema_gsurl
+        if not (
+            launch_template_params["parameters"].get("javascriptTextTransformGcsPath")
+        ):
+            js_gsurl = f"{gsurl}_config/transform.js"
+            # TODO(jaketf) move this JS function rendering somewhere more
+            #  configurable
+            # TODO(jaketf) make delimiter configurable.
+            field_parsing = '\n'.join(
+                [
+                    f'obj.{field.name} = values[{index}];'
+                    for index, field in enumerate(dest_table.schema)
+                ]
+            )
+            js_transform = textwrap.dedent(f"""
+            function remove_ascii_null(line) {{
+                return line.replace('\u0000', '');
+            }}
+
+            function csv_to_json(line) {{
+                // TODO(jaketf) make delimiter configurable
+                var values = line.split('\u0010')
+                var obj = new Object();
+
+                {field_parsing}
+
+                var jsonString = JSON.stringify(obj);
+
+                return jsonString;
+            }}
+
+            function clean(line) {{
+                return csv_to_json(remove_ascii_null(line))
+            }}
+            """)
+            print(
+                f"writing JS rendered transform object to {js_gsurl} for use by"
+                " dataflow template. Rendered JS transform:\n"
+                f"{js_transform}"
+            )
+            blob = storage.Blob.from_string(js_gsurl)
+            blob.upload_from_string(json.dumps(wrapped_schema),
+                                    content_type='application/javascript',
+                                    client=gcs_client)
+            js_path_key = "javascriptTextTransformGcsPath"
+            function_name_key = "javascriptTextTransformFunctionName"
+            launch_template_params["parameters"][js_path_key] = js_gsurl
+            launch_template_params["parameters"][function_name_key] = "clean"
+
+    # use our the job id controlled by this cloud function
+    launch_template_params["jobName"] = job_id
+    # add user labels to indicate that this job was submitted by this function
+    if launch_template_params["environment"].get("additionalUserLabels"):
+        launch_template_params["environment"]["additionalUserLabels"].update(
+            constants.DEFAULT_JOB_LABELS)
+    else:
+        launch_template_params["environment"]["additionalUserLabels"] = \
+            constants.DEFAULT_JOB_LABELS
+    request = (dataflow_client.projects().locations().templates().launch(
+        projectId=constants.DATAFLOW_PROJECT_ID,
+        location=constants.DATAFLOW_REGION,
+        gcsPath=template_gcs_path,
+        body=launch_template_params))
+    response = request.execute()
+    # Dataflow Job IDs are server generated != to user provided jobName
+    server_job_id = response["job"]["id"]
+    return server_job_id
+
+
+class DataflowJobStatus:
+    """
+    Helper class with Dataflow job statuses.
+    Reference: https://cloud.google.com/dataflow/docs/reference/rest/v1b3/projects.jobs#Job.JobState
+    """
+
+    JOB_STATE_DONE = "JOB_STATE_DONE"
+    JOB_STATE_UNKNOWN = "JOB_STATE_UNKNOWN"
+    JOB_STATE_STOPPED = "JOB_STATE_STOPPED"
+    JOB_STATE_RUNNING = "JOB_STATE_RUNNING"
+    JOB_STATE_FAILED = "JOB_STATE_FAILED"
+    JOB_STATE_CANCELLED = "JOB_STATE_CANCELLED"
+    JOB_STATE_PENDING = "JOB_STATE_PENDING"
+    JOB_STATE_CANCELLING = "JOB_STATE_CANCELLING"
+    JOB_STATE_QUEUED = "JOB_STATE_QUEUED"
+    FAILED_END_STATES = {JOB_STATE_FAILED, JOB_STATE_CANCELLED}
+    TERMINAL_STATES = {JOB_STATE_DONE} | FAILED_END_STATES
+    AWAITING_STATES = {
+        JOB_STATE_RUNNING,
+        JOB_STATE_PENDING,
+        JOB_STATE_QUEUED,
+        JOB_STATE_CANCELLING,
+        JOB_STATE_STOPPED,
+    }
+
+
+def wait_on_dataflow_job_id(dataflow_client: googleapiclient.discovery.Resource,
+                            job_id: str,
+                            polling_timeout: int,
+                            polling_interval: int = 1) -> bool:
+    """"
+    Wait for a Dataflow Job ID to complete.
+
+    Args:
+        dataflow_client: googleapiclient.discovery.Resource
+        job_id: str the dataflow job ID to wait on
+        polling_timeout: int number of seconds to poll this job ID
+        polling_interval: frequency to query the job state during polling
+    Returns:
+        bool: if the job ID has finished successfully. True if DONE without
+        errors, False if RUNNING or PENDING
+    Raises:
+        exceptions.BigQueryJobFailure if the job failed.
+        google.api_core.exceptions.NotFound if the job id cannot be found.
+    """
+    start_poll = time.monotonic()
+    get_job_request = (dataflow_client.projects().locations().jobs().get(
+        projectId=constants.DATAFLOW_PROJECT_ID,
+        location=constants.DATAFLOW_REGION,
+        jobId=job_id,
+        view='JOB_VIEW_SUMMARY'))
+    get_job_messages_request = (
+        dataflow_client.projects().locations().jobs().get(
+            projectId=constants.DATAFLOW_PROJECT_ID,
+            location=constants.DATAFLOW_REGION,
+            jobId=job_id,
+            minimumImportance='JOB_JOB_MESSAGE_WARNING'))
+    job = {}
+    while time.monotonic() - start_poll < (polling_timeout - polling_interval):
+        job = get_job_request.execute()
+        if job["currentState"] == DataflowJobStatus.JOB_STATE_DONE:
+            return True
+        if job["currentState"] in DataflowJobStatus.FAILED_END_STATES:
+            messages_response = get_job_messages_request.execute()
+            raise exceptions.DataflowJobFailure(
+                f"Dataflow Job failed Job Name: {job['name']} "
+                f"Job ID: {job['id']}\n"
+                "Job Messages: \n"
+                f"{pprint.pformat(messages_response['jobMessages'])}")
+        if job["currentState"] in DataflowJobStatus.AWAITING_STATES:
+            print(f"waiting on Dataflow Job Name: {job['name']} "
+                  f"Job ID: {job['id']}")
+            time.sleep(polling_interval)
+
+    print("reached polling timeout waiting for dataflow job name: "
+          f"{job.get('name')} job id {job.get('id')}.")
+    return False
+
+
+def wait_on_dataproc_workflow_template(
+    dp_wft_client: workflow_template_service.WorkflowTemplateServiceClient,
+    job_id: str,
+    polling_timeout: int,
+    polling_interval: int = 1
+) -> bool:
+    """"
+    Wait for a Dataproc Workflow Template ID to complete.
+
+    Args:
+        dp_wft_client: workflow_template_service.WorkflowTemplateServiceClient
+        job_id: str the Dataproc WFT job ID to wait on
+        polling_timeout: int number of seconds to poll this job ID
+        polling_interval: frequency to query the job state during polling
+    Returns:
+        bool: if the job ID has finished successfully. True if DONE without
+        errors, False if RUNNING or PENDING
+    Raises:
+        exceptions.DataprocWorkflowFailure if the job failed.
+        google.api_core.exceptions.NotFound if the job id cannot be found.
+    """
+    start_poll = time.monotonic()
+    wft_operation = {}
+    while time.monotonic() - start_poll < (polling_timeout - polling_interval):
+        # See https://cloud.google.com/dataproc/docs/concepts/workflows/debugging#using_workflowmetadata
+        wft_operation = (
+            dp_wft_client.transport.operations_client.get_operation(job_id))
+        state = wft_operation["metadata"].get("state")
+        if state == "DONE":
+            nodes = wft_operation["metadata"].get("graph", {}).get("nodes", [])
+            for node in nodes:
+                if node.get("error"):
+                    raise exceptions.DataprocWorkflowFailure(
+                        "Dataproc Workflow failed Name: "
+                        f"{wft_operation['name']}\n"
+                        f"Failed in step: {node.get('stepId')}\n"
+                        f"in job id: {node.get('jobId')}\n"
+                        f"with error: {node.get('error')}"
+                        f"\n full graph: {pprint.pformat(node.get('graph'))}")
+        if state in {"UNKOWN", "PENDING", "RUNNING"}:
+            print(f"waiting on Dataproc workflow Name: {wft_operation['name']} "
+                  f"latest details: \n"
+                  f"{pprint.pformat(wft_operation)}")
+            time.sleep(polling_interval)
+
+    print(f"reached polling timeout waiting for dataproc job name: {job_id}.\n"
+          f"latest details: \n"
+          f"{pprint.pformat(wft_operation)}")
+    return False

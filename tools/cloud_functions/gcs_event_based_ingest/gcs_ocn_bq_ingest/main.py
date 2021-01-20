@@ -22,8 +22,10 @@ import time
 import traceback
 from typing import Dict, Optional
 
+import google.auth
 # pylint in cloud build is being flaky about this import discovery.
 # pylint: disable=no-name-in-module
+import googleapiclient.discovery
 from google.cloud import bigquery
 from google.cloud import error_reporting
 from google.cloud import storage
@@ -52,6 +54,8 @@ GCS_CLIENT = None
 
 DATAPROC_WORKFLOW_TEMPLATE_CLIENT = None
 
+DATAFLOW_CLIENT = None
+
 
 def main(event: Dict, context):  # pylint: disable=unused-argument
     """entry point for background cloud function for event driven GCS to
@@ -76,7 +80,12 @@ def main(event: Dict, context):  # pylint: disable=unused-argument
 
         gcs_client = lazy_gcs_client()
         bq_client = lazy_bq_client()
-        dp_wft_client = lazy_dataproc_workflow_template_client()
+        dp_wft_client = None
+        dataflow_client = None
+        if constants.DATAPROC_ENABLED:
+            dp_wft_client = lazy_dataproc_workflow_template_client()
+        if constants.DATAFLOW_ENABLED:
+            dataflow_client = lazy_dataflow_client()
 
         enforce_ordering = (constants.ORDER_PER_TABLE
                             or utils.look_for_config_in_parents(
@@ -86,8 +95,8 @@ def main(event: Dict, context):  # pylint: disable=unused-argument
         bkt: storage.Bucket = utils.cached_get_bucket(gcs_client, bucket_id)
         event_blob: storage.Blob = bkt.blob(object_id)
 
-        triage_event(gcs_client, bq_client, dp_wft_client, event_blob,
-                     function_start_time, enforce_ordering)
+        triage_event(gcs_client, bq_client, dp_wft_client, dataflow_client,
+                     event_blob, function_start_time, enforce_ordering)
 
     # Unexpected exceptions will actually raise which may cause a cold restart.
     except exceptions.DuplicateNotificationException:
@@ -115,6 +124,7 @@ def triage_event(
         bq_client: Optional[bigquery.Client],
         dp_wft_client: Optional[
             workflow_template_service.client.WorkflowTemplateServiceClient],
+        dataflow_client: Optional[googleapiclient.discovery.Resource],
         event_blob: storage.Blob,
         function_start_time: float,
         enforce_ordering: bool = False):
@@ -156,8 +166,9 @@ def triage_event(
                     f"{event_blob.name}\n"
                     f"{constants.BACKFILL_FILENAME} files "
                     "are expected only at the table prefix level.")
-            ordering.backlog_subscriber(gcs_client, bq_client, event_blob,
-                                        function_start_time)
+            ordering.backlog_subscriber(
+                gcs_client, bq_client, dp_wft_client,
+                dataflow_client, event_blob, function_start_time)
             return
         raise RuntimeError(f"gs://{event_blob.bucket.name}/"
                            f"{event_blob.name} could not be triaged.")
@@ -166,6 +177,8 @@ def triage_event(
             utils.apply(
                 gcs_client,
                 bq_client,
+                dp_wft_client,
+                dataflow_client,
                 event_blob,
                 None,  # no lock blob when ordering not enabled.
                 utils.create_job_id(event_blob.name))
@@ -215,8 +228,8 @@ def lazy_gcs_client() -> storage.Client:
 def lazy_dataproc_workflow_template_client(
 ) -> workflow_template_service.client.WorkflowTemplateServiceClient:
     """
-    Return a BigQuery Client that may be shared between cloud function
-    invocations.
+    Return a Dataproc Workflow Template client that may be shared between cloud
+    function invocations.
     """
     global DATAPROC_WORKFLOW_TEMPLATE_CLIENT
     if not DATAPROC_WORKFLOW_TEMPLATE_CLIENT:
@@ -224,3 +237,16 @@ def lazy_dataproc_workflow_template_client(
             workflow_template_service.client.WorkflowTemplateServiceClient(
                 client_info=constants.CLIENT_INFO)
     return DATAPROC_WORKFLOW_TEMPLATE_CLIENT
+
+
+def lazy_dataflow_client() -> googleapiclient.discovery.Resource:
+    """
+    Return a Dataflow Client that may be shared between cloud function
+    invocations.
+    """
+    global DATAFLOW_CLIENT
+    credentials, _ = google.auth.default()
+    if not DATAFLOW_CLIENT:
+        DATAFLOW_CLIENT = googleapiclient.discovery.build(
+            "dataflow", "v1b3", credentials=credentials, cache_discovery=False)
+    return DATAFLOW_CLIENT

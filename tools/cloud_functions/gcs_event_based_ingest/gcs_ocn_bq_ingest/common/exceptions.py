@@ -23,8 +23,8 @@ class DuplicateNotificationException(Exception):
 
 
 class BigQueryJobFailure(Exception):
-    """Exception to indicate that the function was triggered twice for the same
-    event."""
+    """Exception to indicate that the function detected a failure in a BigQuery
+    job that it was polling."""
 
 
 class DestinationRegexMatchException(Exception):
@@ -41,6 +41,16 @@ class UnexpectedTriggerException(Exception):
 class BacklogException(Exception):
     """Exception to indicate an issue with the backlog mechanics of this
     function."""
+
+
+class DataflowJobFailure(Exception):
+    """Exception to indicate that the function detected a failure in a Dataflow
+    job that it was polling."""
+
+
+class DataprocWorkflowFailure(Exception):
+    """Exception to indicate that the function detected a failure in a Dataproc
+    job that it was polling."""
 
 
 EXCEPTIONS_TO_REPORT = (

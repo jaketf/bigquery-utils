@@ -3,3 +3,7 @@ google-cloud-storage>=1.35.0
 google-cloud-dataproc>=2.2.0
 google-cloud-error-reporting>=1.1.0
 cachetools
+google-auth
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib

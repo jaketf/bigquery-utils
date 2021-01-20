@@ -20,15 +20,18 @@ import datetime
 import os
 import time
 import traceback
+import urllib.parse
 from typing import Optional, Tuple
 
 import google.api_core
 import google.api_core.exceptions
+import googleapiclient.discovery
 import pytz
 # pylint in cloud build is being flaky about this import discovery.
 # pylint: disable=no-name-in-module
 from google.cloud import bigquery
 from google.cloud import storage
+from google.cloud.dataproc_v1beta2.services import workflow_template_service
 
 from . import constants  # pylint: disable=no-name-in-module,import-error
 from . import exceptions  # pylint: disable=no-name-in-module,import-error
@@ -53,9 +56,12 @@ def backlog_publisher(
                                                     table_prefix)
 
 
-def backlog_subscriber(gcs_client: Optional[storage.Client],
-                       bq_client: Optional[bigquery.Client],
-                       backfill_blob: storage.Blob, function_start_time: float):
+def backlog_subscriber(
+        gcs_client: Optional[storage.Client],
+        bq_client: Optional[bigquery.Client], dp_wft_client: Optional[
+            workflow_template_service.WorkflowTemplateServiceClient],
+        dataflow_client: Optional[googleapiclient.discovery.Resource],
+        backfill_blob: storage.Blob, function_start_time: float):
     """Pick up the table lock, poll BQ job id until completion and process next
     item in the backlog.
     """
@@ -88,13 +94,23 @@ def backlog_subscriber(gcs_client: Optional[storage.Client],
         lock_contents = utils.read_gcs_file_if_exists(
             gcs_client, f"gs://{bkt.name}/{lock_blob.name}")
         if lock_contents:
+            parsed_lock: urllib.parse.ParseResult = urllib.parse.urlparse(
+                lock_contents)
+            job_scheme, job_id = parsed_lock.scheme, parsed_lock.netloc
             # is this a lock placed by this cloud function.
             # the else will handle a manual _bqlock
-            if lock_contents.startswith(
-                    os.getenv('JOB_PREFIX', constants.DEFAULT_JOB_PREFIX)):
-                last_job_done = wait_on_last_job(bq_client, lock_blob,
-                                                 backfill_blob, lock_contents,
-                                                 polling_timeout)
+            if job_scheme == 'bq':
+                last_job_done = wait_on_last_bq_job(bq_client, lock_blob,
+                                                    backfill_blob, job_id,
+                                                    polling_timeout)
+            elif job_scheme == 'dataflow':
+                last_job_done = wait_on_last_dataflow_job(
+                    dataflow_client, lock_blob, backfill_blob, job_id,
+                    polling_timeout)
+            elif job_scheme == 'dataproc':
+                last_job_done = wait_on_last_dataproc_workflow(
+                    dp_wft_client, lock_blob, backfill_blob, job_id,
+                    polling_timeout)
             else:
                 print(f"sleeping for {polling_timeout} seconds because"
                       f"found manual lock gs://{bkt.name}/{lock_blob.name} with"
@@ -116,8 +132,9 @@ def backlog_subscriber(gcs_client: Optional[storage.Client],
             # If the BQ lock was missing we do not want to delete a backlog
             # item for a job we have not yet submitted.
             utils.remove_oldest_backlog_item(gcs_client, bkt, table_prefix)
-        should_subscriber_exit = handle_backlog(gcs_client, bq_client, bkt,
-                                                lock_blob, backfill_blob)
+        should_subscriber_exit = handle_backlog(gcs_client, bq_client,
+                                                dp_wft_client, dataflow_client,
+                                                bkt, lock_blob, backfill_blob)
         if should_subscriber_exit:
             return
     # retrigger the subscriber loop by reposting the _BACKFILL file
@@ -127,9 +144,9 @@ def backlog_subscriber(gcs_client: Optional[storage.Client],
     backfill_blob.upload_from_string("")
 
 
-def wait_on_last_job(bq_client: bigquery.Client, lock_blob: storage.Blob,
-                     backfill_blob: storage.blob, job_id: str,
-                     polling_timeout: int):
+def wait_on_last_bq_job(bq_client: bigquery.Client, lock_blob: storage.Blob,
+                        backfill_blob: storage.blob, job_id: str,
+                        polling_timeout: int):
     """wait on a bigquery job or raise informative exception.
 
     Args:
@@ -165,6 +182,9 @@ def wait_on_last_job(bq_client: bigquery.Client, lock_blob: storage.Blob,
 def handle_backlog(
     gcs_client: storage.Client,
     bq_client: bigquery.Client,
+    dp_wft_client: Optional[
+        workflow_template_service.WorkflowTemplateServiceClient],
+    dataflow_client: Optional[googleapiclient.discovery.Resource],
     bkt: storage.Bucket,
     lock_blob: storage.Blob,
     backfill_blob: storage.Blob,
@@ -174,6 +194,9 @@ def handle_backlog(
     Args:
         gcs_client: storage.Client
         bq_client: bigquery.Client
+        dp_wft_client: Optional[
+            workflow_template_service.WorkflowTemplateServiceClient]
+        dataflow_client: Optional[googleapiclient.discovery.Resource]
         bkt: storage.Bucket
         lock_blob: storage.Blob _bqlock blob
         backfill_blob: storage.blob _BACKFILL blob
@@ -196,8 +219,8 @@ def handle_backlog(
         print("applying next batch for:"
               f"gs://{next_success_file.bucket}/{next_success_file.name}")
         next_job_id = utils.create_job_id(next_success_file.name)
-        utils.apply(gcs_client, bq_client, next_success_file, lock_blob,
-                    next_job_id)
+        utils.apply(gcs_client, bq_client, dp_wft_client, dataflow_client,
+                    next_success_file, lock_blob, next_job_id)
         return False  # BQ job running
     print("no more files found in the backlog deleteing backfill blob")
     backfill_blob.delete(if_generation_match=backfill_blob.generation,
@@ -362,3 +385,78 @@ def _get_clients_if_none(
             default_query_job_config=default_query_config,
             project=os.getenv("BQ_PROJECT", os.getenv("GCP_PROJECT")))
     return gcs_client, bq_client
+
+
+def wait_on_last_dataflow_job(
+        dataflow_client: googleapiclient.discovery.Resource,
+        lock_blob: storage.Blob, backfill_blob: storage.blob, job_id: str,
+        polling_timeout: int):
+    """wait on a dataflow job or raise informative exception.
+
+    Args:
+        dataflow_client: bigquery.Client
+        lock_blob: storage.Blob _bqlock blob
+        backfill_blob: storage.blob _BACKFILL blob
+        job_id: str BigQuery job ID to wait on (read from _bqlock file)
+        polling_timeout: int seconds to poll before returning.
+    """
+    try:
+        return utils.wait_on_dataflow_job_id(dataflow_client, job_id,
+                                             polling_timeout)
+    except (exceptions.DataflowJobFailure,
+            google.api_core.exceptions.NotFound) as err:
+        table_prefix = utils.get_table_prefix(backfill_blob.name)
+        raise exceptions.DataflowJobFailure(
+            f"previous BigQuery job: {job_id} failed or could not "
+            "be found. This will kill the backfill subscriber for "
+            f"the table prefix: {table_prefix}."
+            "Once the issue is dealt with by a human, the lock "
+            "file at: "
+            f"gs://{lock_blob.bucket.name}/{lock_blob.name} "
+            "should be manually removed and a new empty "
+            f"{constants.BACKFILL_FILENAME} "
+            "file uploaded to: "
+            f"gs://{backfill_blob.bucket.name}/{table_prefix}"
+            "/_BACKFILL "
+            f"to resume the backfill subscriber so it can "
+            "continue with the next item in the backlog.\n"
+            "Original Exception:\n"
+            f"{traceback.format_exc()}") from err
+
+
+def wait_on_last_dataproc_workflow(dp_wft_client: Optional[
+    workflow_template_service.WorkflowTemplateServiceClient],
+                              lock_blob: storage.Blob,
+                              backfill_blob: storage.blob, job_id: str,
+                              polling_timeout: int):
+    """wait on a dataflow job or raise informative exception.
+
+    Args:
+        dataflow_client: bigquery.Client
+        lock_blob: storage.Blob _bqlock blob
+        backfill_blob: storage.blob _BACKFILL blob
+        job_id: str BigQuery job ID to wait on (read from _bqlock file)
+        polling_timeout: int seconds to poll before returning.
+    """
+    try:
+        return utils.wait_on_dataproc_wft_id(dp_wft_client, job_id,
+                                             polling_timeout)
+    except (exceptions.DataprocWorkflowFailure,
+            google.api_core.exceptions.NotFound) as err:
+        table_prefix = utils.get_table_prefix(backfill_blob.name)
+        raise exceptions.DataprocWorkflowFailure(
+            f"previous BigQuery job: {job_id} failed or could not "
+            "be found. This will kill the backfill subscriber for "
+            f"the table prefix: {table_prefix}."
+            "Once the issue is dealt with by a human, the lock "
+            "file at: "
+            f"gs://{lock_blob.bucket.name}/{lock_blob.name} "
+            "should be manually removed and a new empty "
+            f"{constants.BACKFILL_FILENAME} "
+            "file uploaded to: "
+            f"gs://{backfill_blob.bucket.name}/{table_prefix}"
+            "/_BACKFILL "
+            f"to resume the backfill subscriber so it can "
+            "continue with the next item in the backlog.\n"
+            "Original Exception:\n"
+            f"{traceback.format_exc()}") from err

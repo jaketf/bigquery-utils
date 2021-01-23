@@ -39,7 +39,7 @@ steps:
     - 'build-ci-image'
   dir: '${_BUILD_DIR}'
   entrypoint: 'bash'
-  args: [ 'tests/gcs_ocn_bq_ingest/test_monitoring_tables.sh' ]
+  args: [ 'tests/monitoring/test_monitoring_tables.sh' ]
   id: 'test-monitoring-queries'
 - name: 'gcr.io/$PROJECT_ID/gcs_event_based_ingest_ci'
   dir: '${_BUILD_DIR}'

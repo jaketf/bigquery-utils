@@ -240,9 +240,84 @@ is deployed. To submit jobs in another BigQuery project set the `BQ_PROJECT`
 environment variable.
 
 ## Monitoring
-Monitoring what data has been loaded by this solution should be done with the
-BigQuery [`INFORMATION_SCHEMA` jobs metadata](https://cloud.google.com/bigquery/docs/information-schema-jobs)
-If more granular data is needed about a particular job id
+### `monitored_tables`
+In order for a table to be included in the monitoring views you must add a corresponding record to the `monitored_tables` table. This table is joined to by the `gcf_ingest_log` and is used to filter the results of that view to only the tables that you care about.
+For example, our table might look like:
+
+| table_group | load_type | source_database_name | source_dataset_name | source_table_name | target_project_name | target_dataset_name| target_table_name |
+|-------------|-----------|----------------------|---------------------|-------------------|---------------------|--------------------|-------------------|
+| Phase 1     | LOAD      | db                   | dataset_a           | table_a           | my-project-name     | dataset_a          | table_a           |
+| Phase 1     | LOAD      | db                   | dataset_a           | table_b           | my-project-name     | dataset_a          | table_b           |
+
+### `gcf_ingest_log`
+This gives you a view of all of the attempts to load a given GCS prefix. For example, if we wanted to see the entire history of jobs for `'table_a'`, we would run the following query:
+```sql
+SELECT
+  table_group,
+  load_type,
+  project_id,
+  dataset_id,
+  table_id,
+  job_type,
+  attempted_chunk,
+  job_id,
+  start_time,
+  end_time,
+  query,
+  gb_per_sec_throughput,
+  total_slot_ms,
+  avg_slots_used,
+  outcome,
+  error_result
+FROM
+  {dataset}.gcf_ingest_log
+WHERE
+  table_id = 'table_a'
+
+```
+This will give you something like:
+
+| table_group   | load_type  | project_id    | dataset_id | table_id | job_type |attempted_gcs_prefix                                 |                                                     job_id                                          |     start_time      |      end_time       | query | gb_per_sec_throughput | total_slot_ms |   avg_slots_used   |  outcome  |       error_result     |
+|---------------|------------|---------------|------------|----------|----------|------------------------------------------------|-----------------------------------------------------------------------------------------------------|---------------------|---------------------|-------|-----------------------|---------------|--------------------|-----------|------------------------|
+|Phase 1        | LOAD       | my-project-id | dataset_a  | table_a  | LOAD     | db-dataset_a-table_a-incremental-1900-01-01-08 | gcf-ingest-db-dataset_a-table_a-incremental-1900-01-01-08-_DONE9197a23a-8791-4a0e-aab7-55b132728ca6 | 2021-01-11 18:13:52 | 2021-01-11 18:13:54 | NULL  |                   0.0 |          1132 | 0.5421455938697318 | FAILED    | {"Some error message"} |
+|Phase 1        | LOAD       | my-project-id | dataset_a  | table_a  | LOAD     | db-dataset_a-table_a-incremental-1900-01-01-08 | gcf-ingest-db-dataset_a-table_a-incremental-1900-01-01-08-_DONEc0f17aa2-740f-4cae-80b7-02c185e5057a | 2021-01-11 20:04:12 | 2021-01-11 20:04:25 | NULL  |    1260021.5833333333 |         14620 | 1.1520882584712373 | SUCCEEDED |                   NULL |
+
+
+### gcf_ingest_latest_by_table
+This view gives you the latest status for the latest load / query job for a given table. If we wanted to see the latest job status for table 'table_a' we would run:
+```sql
+SELECT
+  table_group,
+  load_type,
+  project_id,
+  dataset_id,
+  table_id,
+  job_type,
+  attempted_chunk,
+  job_id,
+  start_time,
+  end_time,
+  query,
+  gb_per_sec_throughput,
+  total_slot_ms,
+  avg_slots_used,
+  outcome,
+  error_result
+FROM
+  {dataset}.gcf_ingest_latest_by_table
+WHERE
+  table_id = 'table_a'
+
+```
+
+This will give you something like:
+
+| table_group | load_type | project_id    | dataset_id | table_id | job_type | attempted_gcs_prefix                                | job_id                                                                                              | start_time          | end_time            | query | gb_per_sec_throughput | total_slot_ms | avg_slots_used     | outcome   | error_result |
+|-------------|-----------|---------------|------------|----------|----------|------------------------------------------------|-----------------------------------------------------------------------------------------------------|---------------------|---------------------|-------|-----------------------|---------------|--------------------|-----------|--------------|
+| Phase 1     | LOAD      | my-project-id | dataset_a  | table_a  | LOAD     | db-dataset_a-table_a-incremental-1900-01-01-08 | gcf-ingest-db-dataset_a-table_a-incremental-1900-01-01-08-_DONEc0f17aa2-740f-4cae-80b7-02c185e5057a | 2021-01-11 20:04:12 | 2021-01-11 20:04:25 | NULL  | 1260021.5833333333    | 14620         | 1.1520882584712373 | SUCCEEDED | NULL         |
+
+
+This table is best used for a high-level view of your ingestion status.
 
 ### Job Naming Convention
 All load or external query jobs will have a job id with a  prefix following this convention:

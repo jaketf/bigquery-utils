@@ -17,26 +17,25 @@
 set -e
 
 # $1 is a query string to dry_run
-function dry_run_query() {
+function run_query() {
   bq query \
     --use_legacy_sql=false \
-    --dry_run \
     "$1"
 }
 
-echo "setting DATASET env variable"
 export DATASET="test_monitoring_dataset_${BUILD_ID}"
-bq --location=US mk -f -d $DATASET
+echo "Creating ${DATASET}"
+bq --location=US mk -f -d "$DATASET"
 
 while IFS= read -r query_file
 do
   echo "$query_file"
-  dry_run_query "$(envsubst < "$query_file")"
+  run_query "$(envsubst < "$query_file")"
   result="$?"
   if [ "$result" -ne 0 ]; then
     echo "Failed to dry run $query_file"
     exit "$result"
   fi
-done <  <(find gcs_ocn_bq_ingest/monitoring -path "*.sql")
+done <  <(find monitoring -path "*.sql" | sort)
 echo "removing dataset $DATASET"
-bq rm -r -f -d $DATASET
+trap "bq rm -r -f -d $DATASET" EXIT

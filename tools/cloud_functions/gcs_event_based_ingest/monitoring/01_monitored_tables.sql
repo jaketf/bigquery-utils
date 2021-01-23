@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 */
-CREATE TABLE
+CREATE TABLE IF NOT EXISTS
     $DATASET.monitored_tables
   (
     table_group              STRING, -- This field is used to group tables together E.G 'Phase 1'

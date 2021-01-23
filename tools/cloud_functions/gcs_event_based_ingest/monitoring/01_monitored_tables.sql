@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 */
+-- This table should contain information on the tables that are using the GCF Ingestion Process
 CREATE TABLE IF NOT EXISTS
     $DATASET.monitored_tables
   (

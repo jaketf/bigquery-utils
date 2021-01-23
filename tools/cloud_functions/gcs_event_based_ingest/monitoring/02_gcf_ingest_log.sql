@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 */
+-- This view shows gcf ingestion job information on a per-job basis
 CREATE VIEW IF NOT EXISTS
   $DATASET.gcf_ingest_log AS
 SELECT

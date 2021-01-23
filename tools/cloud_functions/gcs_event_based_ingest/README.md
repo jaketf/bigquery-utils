@@ -308,7 +308,7 @@ This will give you something like:
 |Phase 1        | LOAD       | my-project-id | dataset_a  | table_a  | LOAD     | db-dataset_a-table_a-incremental-1900-01-01-08 | gcf-ingest-db-dataset_a-table_a-incremental-1900-01-01-08-_DONEc0f17aa2-740f-4cae-80b7-02c185e5057a | 2021-01-11 20:04:12 | 2021-01-11 20:04:25 | NULL  |    1260021.5833333333 |         14620 | 1.1520882584712373 | SUCCEEDED |                   NULL |
 
 
-### gcf_ingest_latest_by_table
+### `gcf_ingest_latest_by_table`
 This view gives you the latest status for the latest load / query job for a given table. If we wanted to see the latest job status for table 'table_a' we would run:
 ```sql
 SELECT

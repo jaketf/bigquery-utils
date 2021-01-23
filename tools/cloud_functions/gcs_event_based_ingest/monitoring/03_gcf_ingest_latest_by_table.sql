@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 */
+-- This view shows the latest gcf ingestion job information for the latest ingestion job for a given table.
 CREATE VIEW IF NOT EXISTS
   $DATASET.gcf_ingest_latest_by_table AS
 SELECT
@@ -22,7 +23,7 @@ SELECT
   dataset_id,
   table_id,
   job_type,
-  attempted_chunk,
+  attempted_gcs_prefix,
   job_id,
   start_time,
   end_time,

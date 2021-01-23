@@ -240,6 +240,31 @@ is deployed. To submit jobs in another BigQuery project set the `BQ_PROJECT`
 environment variable.
 
 ## Monitoring
+### Deploying the tables
+Here is an example of a script you can use to deploy the monitoring views. Simply replace the `{YOUR_DATASET_NAME}` with the name of your dataset and run this shell command in this directory.
+```shell
+set -e
+
+# $1 is a query string to dry_run
+function run_query() {
+  bq query \
+    --use_legacy_sql=false \
+    "$1"
+}
+
+export DATASET="{YOUR_DATASET_NAME}"
+while IFS= read -r query_file
+do
+  echo "$query_file"
+  run_query "$(envsubst < "$query_file")"
+  result="$?"
+  if [ "$result" -ne 0 ]; then
+    echo "Failed to run $query_file"
+    exit "$result"
+  fi
+done <  <(find monitoring -path "*.sql" | sort)
+```
+
 ### `monitored_tables`
 In order for a table to be included in the monitoring views you must add a corresponding record to the `monitored_tables` table. This table is joined to by the `gcf_ingest_log` and is used to filter the results of that view to only the tables that you care about.
 For example, our table might look like:

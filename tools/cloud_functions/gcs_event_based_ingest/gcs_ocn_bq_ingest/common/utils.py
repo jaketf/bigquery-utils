@@ -24,6 +24,7 @@ import json
 import os
 import pathlib
 import pprint
+import sys
 import time
 import uuid
 from typing import Any, Deque, Dict, List, Optional, Tuple, Union
@@ -59,7 +60,7 @@ def external_query(  # pylint: disable=too-many-arguments
         external_table_def = json.loads(external_table_config)
     else:
         print(f" {gsurl}_config/external.json not found in parents of {gsurl}. "
-              "Falling back to default PARQUET external table:\n"
+              "Falling back to default PARQUET external table: "
               f"{json.dumps(constants.DEFAULT_EXTERNAL_TABLE_DEFINITION)}")
         external_table_def = constants.DEFAULT_EXTERNAL_TABLE_DEFINITION
 
@@ -301,12 +302,12 @@ def parse_notification(notification: dict) -> Tuple[str, str]:
                 f"attributes: 'bucketId' and 'objectId': {notification}"
             ) from KeyError
     raise exceptions.UnexpectedTriggerException(
-        "Cloud Function received unexpected trigger:\n"
-        f"{notification}\n"
+        "Cloud Function received unexpected trigger: "
+        f"{notification} "
         "This function only supports direct Cloud Functions "
         "Background Triggers or Pub/Sub storage notificaitons "
-        "as described in the following links:\n"
-        "https://cloud.google.com/storage/docs/pubsub-notifications\n"
+        "as described in the following links: "
+        "https://cloud.google.com/storage/docs/pubsub-notifications "
         "https://cloud.google.com/functions/docs/tutorials/storage")
 
 
@@ -545,7 +546,7 @@ def check_for_bq_job_and_children_errors(bq_client: bigquery.Client,
     if job.errors:
         raise exceptions.BigQueryJobFailure(
             f"BigQuery Job {job.job_id} failed during backfill with the "
-            f"following errors: {job.errors}\n"
+            f"following errors: {job.errors} "
             f"{pprint.pformat(job.to_api_repr())}")
     if isinstance(job, bigquery.QueryJob):
         if (constants.FAIL_ON_ZERO_DML_ROWS_AFFECTED
@@ -553,7 +554,7 @@ def check_for_bq_job_and_children_errors(bq_client: bigquery.Client,
                 and job.num_dml_affected_rows < 1):
             raise exceptions.BigQueryJobFailure(
                 f"query job {job.job_id} ran successfully but did not "
-                f"affect any rows.\n {pprint.pformat(job.to_api_repr())}")
+                f"affect any rows.  {pprint.pformat(job.to_api_repr())}")
         for child_job in bq_client.list_jobs(parent_job=job):
             check_for_bq_job_and_children_errors(bq_client, child_job)
 
@@ -716,6 +717,7 @@ def apply(
     lock_blob: Optional[storage.Blob],
     job_id: str,
 ):
+    # pylint: disable=too-many-locals
     """
     Apply an incremental batch to the target BigQuery table via an asynchronous
     load job or external query.
@@ -741,14 +743,28 @@ def apply(
     )
     external_query_sql = look_for_config_in_parents(
         gcs_client, f"gs://{bkt.name}/{success_blob.name}", '*.sql')
+    try:
 
-    if external_query_sql:
-        print("EXTERNAL QUERY")
-        print(f"found external query:\n{external_query_sql}")
-        external_query(gcs_client, bq_client, gsurl, external_query_sql,
-                       dest_table_ref, job_id)
+        if external_query_sql:
+            print("EXTERNAL QUERY")
+            print(f"found external query: {external_query_sql}")
+            external_query(gcs_client, bq_client, gsurl, external_query_sql,
+                           dest_table_ref, job_id)
+            return
+
+        print("LOAD_JOB")
+        load_batches(gcs_client, bq_client, gsurl, dest_table_ref, job_id)
         return
 
-    print("LOAD_JOB")
-    load_batches(gcs_client, bq_client, gsurl, dest_table_ref, job_id)
-    return
+    except (google.api_core.exceptions.GoogleAPIError,
+            google.api_core.exceptions.ClientError) as err:
+        etype, value, _ = sys.exc_info()
+        msg = (f"failed to submit job {job_id} for {gsurl}: "
+               f"{etype.__class__.__name__}: {value}")
+        blob = storage.Blob.from_string(gsurl)
+        table_prefix = get_table_prefix(blob.name)
+        bqlock = storage.Blob.from_string(
+            f"gs://{blob.bucket.name}/{table_prefix}/_bqlock")
+        # Write this error message to avoid confusion.
+        handle_bq_lock(gcs_client, bqlock, msg)
+        raise exceptions.BigQueryJobFailure(msg) from err
